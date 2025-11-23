@@ -1,9 +1,0 @@
-minikube start
-
-kubectl get pods
-
-kubectl port-forward svc/my-minio 9000:9000 9001:9001
-kubectl port-forward svc/my-kafka 9092:9092
-kubectl port-forward svc/my-mongodb 27017:27017
-
-Minio console: http://127.0.0.1:9001
