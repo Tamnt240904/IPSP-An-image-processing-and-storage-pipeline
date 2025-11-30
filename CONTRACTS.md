@@ -59,6 +59,7 @@
     "width": 1280,
     "height": 720
   },
+  "traffic_status": "Free",
   "inference_metrics": {
     "counts": {
       "total": 12,
@@ -68,6 +69,10 @@
       "truck": 1
     },
     "density_percent": 0.25
+  },
+  "debug_pixels": {
+    "road_pixels": 600500,
+    "vehicle_pixels": 50000
   },
   "raw_yolo_results": [
     {"class_name": "car", "confidence": 0.92, "box_xywh": [100, 150, 50, 80]},
@@ -89,9 +94,11 @@
 | **`processing_timestamp`** | ISODate | Do Spark tạo ra (current\_timestamp()). Giúp P5 lọc "kết quả mới nhất". |
 | **`camera_id`** | String | Lấy từ Kafka. |
 | **`frame_dimensions`** | Object | (Đã chốt) Luôn là 1280x720. |
+| **`traffic_status`** | String | Trạng thái giao thông ("Free", "Normal", "Congested"). |
 | **`inference_metrics`** | Object | Kết quả cốt lõi (được P1/P4 tính toán bên trong Spark). |
 | `inference_metrics.counts` | Object | Số lượng đếm được cho từng loại (class) phương tiện từ YOLO. |
 | `inference_metrics.density_percent` | Double | Tỷ lệ mật độ (ví dụ: tổng diện tích box / diện tích ảnh). |
+| `debug_pixels` | Object | Số lượng pixel dùng để debug công thức tính mật độ. |
 | **`raw_yolo_results`** | Array[Object] | Mảng chứa output thô từ mô hình YOLO, hữu ích cho P4 debug. |
 | **`pipeline_info`** | Object | Metadata về quá trình chạy (dùng để gỡ lỗi). |
 | `pipeline_info.model_checkpoint` | String | Tên file model checkpoint (ví dụ: v1.2.pt) mà P4 cung cấp. |

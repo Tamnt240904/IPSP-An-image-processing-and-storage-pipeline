@@ -10,10 +10,11 @@ spec:
     app: mongodb
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet # <-- Đổi sang StatefulSet
 metadata:
   name: my-mongodb
 spec:
+  serviceName: "my-mongodb"
   replicas: 1
   selector:
     matchLabels:
@@ -33,3 +34,14 @@ spec:
           value: "root"
         - name: MONGO_INITDB_ROOT_PASSWORD
           value: "bigdataproject"
+        volumeMounts:      # <-- Gắn ổ cứng
+        - name: mongo-data
+          mountPath: /data/db
+  volumeClaimTemplates:    # <-- Yêu cầu cấp ổ cứng
+  - metadata:
+      name: mongo-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 5Gi
