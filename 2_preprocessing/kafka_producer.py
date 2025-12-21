@@ -1,107 +1,122 @@
+import os
 import time
 import json
-import glob
-import os
-from datetime import datetime
+import lmdb
+import msgpack
+import datetime
+import threading
 from kafka import KafkaProducer
+from minio import Minio
 
-DATA_DIR = "/home/dell/Desktop/data_raw" 
-KAFKA_BOOTSTRAP_SERVERS = 'localhost:9092'
-TOPIC_NAME = 'traffic-metadata'
+# --- CẤU HÌNH ---
+KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
+TOPIC_NAME = "traffic_data"
+# Giả định topic có 10 partitions (0-9)
+NUM_PARTITIONS = 10 
 
-def create_producer():
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "bigdataproject") 
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "bigdataproject")
+BUCKET_NAME = "traffic-data"
+MINIO_PREFIX = "raw_lmdb" 
+
+CAM_MODE = os.environ.get("CAM_MODE", "dev").lower()
+FPS = 5 
+
+def get_target_cameras():
+    if CAM_MODE == "demo":
+        return [f"cam_{i:02d}" for i in range(11, 21)]
+    return [f"cam_{i:02d}" for i in range(1, 11)]
+
+def stream_single_camera(cam_id, lmdb_path, producer):
+    """Hàm chạy trong thread riêng cho từng camera"""
+    print(f"🧵 [Thread-{cam_id}] Bắt đầu stream...")
+    
+    # --- LOGIC ÉP PARTITION ---
+    # cam_01 -> partition 0, cam_10 -> partition 9
     try:
-        producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            batch_size=16384, 
-            linger_ms=10
-        )
-        print(f"✅ Đã kết nối tới Kafka tại {KAFKA_BOOTSTRAP_SERVERS}")
-        return producer
+        cam_num = int(cam_id.split('_')[1])
+        # Nếu cam_01 đến cam_10, ta trừ 1 để lấy index 0-9
+        # Nếu cam_11 đến cam_20, ta dùng % để quay vòng partition
+        target_partition = (cam_num - 1) % NUM_PARTITIONS
+    except:
+        target_partition = 0
+
+    try:
+        env = lmdb.open(lmdb_path, readonly=True, lock=False)
+        with env.begin() as txn:
+            cursor = txn.cursor()
+            count = 0
+            for _, value in cursor:
+                try:
+                    record = msgpack.unpackb(value, raw=False)
+                    label_data = record['label']
+                    label_data['timestamp'] = datetime.datetime.utcnow().isoformat()
+                    label_data['camera_id'] = cam_id
+                    
+                    # GỬI TIN NHẮN VỚI PARTITION CỐ ĐỊNH
+                    producer.send(
+                        TOPIC_NAME, 
+                        key=cam_id, 
+                        value=label_data,
+                        partition=target_partition # Ép đúng partition
+                    )
+                    
+                    count += 1
+                    if count % 50 == 0:
+                        print(f"📡 {cam_id} -> Partition {target_partition}: đã gửi {count} frames")
+                    
+                    time.sleep(1.0 / FPS)
+                except Exception as e:
+                    print(f"❌ Lỗi xử lý frame tại {cam_id}: {e}")
+                    continue
+        env.close()
+        print(f"🏁 [Thread-{cam_id}] HOÀN THÀNH.")
     except Exception as e:
-        print(f"❌ Lỗi kết nối Kafka: {e}")
-        return None
+        print(f"⚠️ Lỗi thread {cam_id}: {e}")
 
-def get_file_timestamp(filepath):
-    try:
-        timestamp = os.path.getmtime(filepath)
-        return datetime.fromtimestamp(timestamp).isoformat()
-    except Exception:
-        return None
-
-def generate_message(filepath):
-    filename = os.path.basename(filepath)
-    record_key = filename.rsplit('.', 1)[0]
+def run_producer():
+    print(f"🚀 [Producer] Khởi động Multi-threaded (Fixed Partitioning)...")
     
-    parts = record_key.split('_')
-    if len(parts) >= 2:
-        camera_id = f"{parts[0]}_{parts[1]}"
-    else:
-        camera_id = "cam_unknown"
+    producer = KafkaProducer(
+        bootstrap_servers=KAFKA_BROKER,
+        key_serializer=lambda k: k.encode('utf-8'),
+        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+        acks=1,
+        batch_size=65536, # Tăng batch size
+        linger_ms=10      # Giảm trễ
+    )
 
-    timestamp = get_file_timestamp(filepath)
-
-    message = {
-        "record_key": record_key,
-        "camera_id": camera_id,
-        "lmdb_info": {
-            "lmdb_filepath": "traffic-data/lmdb_data/data.mdb",
-            "frame_height": 720,
-            "frame_width": 1280
-        },
-        "schema_version": "1.0"
-    }
-
-    if timestamp:
-        message["timestamp"] = timestamp
-
-    return message
-
-def run_batch_producer():
-    print("📂 Đang quét danh sách ảnh...")
-    jpg_files = glob.glob(os.path.join(DATA_DIR, "*.jpg"))
-    jpg_files.sort()
+    minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
+    local_paths = {}
+    target_cams = get_target_cameras()
     
-    total_files = len(jpg_files)
-    if total_files == 0:
-        print("❌ Không tìm thấy ảnh nào! Kiểm tra lại đường dẫn DATA_DIR.")
-        return
-
-    print(f"👉 Tìm thấy {total_files} ảnh. Bắt đầu chế độ BATCH INGESTION (Xả lũ)...")
-
-    producer = create_producer()
-    if not producer:
-        return
-
-    count = 0
-    start_time = time.time()
-
-    try:
-        for filepath in jpg_files:
-            msg = generate_message(filepath)
-            
-            producer.send(TOPIC_NAME, key=msg['record_key'].encode('utf-8'), value=msg)
-            
-            count += 1
-            
-            if count % 1000 == 0:
-                print(f"🚀 Đã đẩy {count}/{total_files} bản tin...")
-
-        producer.flush()
+    for cam_id in target_cams:
+        local_path = f"/tmp/{cam_id}.lmdb"
+        if not os.path.exists(local_path):
+            os.makedirs(local_path)
         
-        end_time = time.time()
-        duration = end_time - start_time
-        print(f"\n✅ HOÀN TẤT! Đã gửi {count} bản tin.")
-        print(f"⏱️ Thời gian chạy: {duration:.2f} giây.")
-        print(f"⚡ Tốc độ trung bình: {count/duration:.0f} tin/giây.")
+        found = False
+        for f in ["data.mdb", "lock.mdb"]:
+            try:
+                minio_client.fget_object(BUCKET_NAME, f"{MINIO_PREFIX}/{cam_id}.lmdb/{f}", f"{local_path}/{f}")
+                found = True
+            except: continue
+        if found:
+            local_paths[cam_id] = local_path
+            print(f"✅ Đã tải: {cam_id}")
 
-    except KeyboardInterrupt:
-        print("\n🛑 Đã dừng bởi người dùng.")
-    except Exception as e:
-        print(f"\n❌ Lỗi runtime: {e}")
-    finally:
-        producer.close()
+    threads = []
+    for cam_id, path in local_paths.items():
+        t = threading.Thread(target=stream_single_camera, args=(cam_id, path, producer))
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
+    producer.flush()
+    print("🎯 TẤT CẢ CAMERA ĐÃ KẾT THÚC DỮ LIỆU.")
 
 if __name__ == "__main__":
-    run_batch_producer()
+    run_producer()

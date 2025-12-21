@@ -15,11 +15,11 @@ spec:
     app: minio
 ---
 apiVersion: apps/v1
-kind: StatefulSet  # <-- Đổi từ Deployment sang StatefulSet
+kind: StatefulSet
 metadata:
   name: my-minio
 spec:
-  serviceName: "my-minio" # Bắt buộc đối với StatefulSet
+  serviceName: "my-minio"
   replicas: 1
   selector:
     matchLabels:
@@ -32,6 +32,7 @@ spec:
       containers:
       - name: minio
         image: minio/minio:latest
+        imagePullPolicy: Always
         args:
         - server
         - /data
@@ -45,10 +46,10 @@ spec:
         ports:
         - containerPort: 9000
         - containerPort: 9001
-        volumeMounts:      # <-- Gắn ổ cứng vào container
+        volumeMounts:
         - name: minio-data
           mountPath: /data
-  volumeClaimTemplates:    # <-- Yêu cầu cấp ổ cứng vĩnh viễn
+  volumeClaimTemplates:
   - metadata:
       name: minio-data
     spec:

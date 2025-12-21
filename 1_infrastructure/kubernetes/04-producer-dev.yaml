@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: traffic-producer
+spec:
+  # Không có replicas và selector ở đây
+  template:
+    metadata:
+      labels:
+        app: traffic-producer
+    spec:
+      restartPolicy: Never # BẮT BUỘC: Chạy xong là dừng, không khởi động lại
+      containers:
+      - name: producer
+        image: laidung/traffic-producer:v6
+        imagePullPolicy: Always
+        env:
+        - name: KAFKA_BROKER
+          value: "my-kafka:9092"
+        - name: MINIO_ENDPOINT
+          value: "my-minio:9000"
+        - name: MINIO_ACCESS_KEY
+          value: "bigdataproject"
+        - name: MINIO_SECRET_KEY
+          value: "bigdataproject"
+        - name: CAM_MODE
+          value: "dev"

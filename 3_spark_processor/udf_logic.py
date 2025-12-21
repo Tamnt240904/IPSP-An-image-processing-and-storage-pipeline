@@ -1,160 +1,102 @@
-import lmdb
 import cv2
 import numpy as np
+import json
+import math
 import os
-import torch
-from PIL import Image
-from ultralytics import YOLO
-from transformers import Mask2FormerImageProcessor, Mask2FormerForUniversalSegmentation
-
-LOCAL_LMDB_PATH = "/home/dell/GitHub/IPSP-An-image-processing-and-storage-pipeline/lmdb_data"
-LOCAL_MODEL_PATH = "/home/dell/GitHub/IPSP-An-image-processing-and-storage-pipeline/4_model_training/model/yolov8_traffic_best.pt"
-
-_yolo_model = None
-_mask_processor = None
-_mask_model = None
-_lmdb_env = None
-_device = "cuda" if torch.cuda.is_available() else "cpu"
-
-def get_yolo_model():
-    global _yolo_model
-    if _yolo_model is None:
-        if not os.path.exists(LOCAL_MODEL_PATH):
-            print(f"⚠️ Không tìm thấy model tại {LOCAL_MODEL_PATH}, đang dùng yolov8m.pt mặc định.")
-            _yolo_model = YOLO("yolov8m.pt")
-        else:
-            print(f"🔄 [Init] Đang load YOLO từ: {LOCAL_MODEL_PATH}")
-            _yolo_model = YOLO(LOCAL_MODEL_PATH)
-    return _yolo_model
-
-def get_mask_model():
-    global _mask_processor, _mask_model
-    if _mask_model is None:
-        model_name = "facebook/mask2former-swin-large-cityscapes-semantic"
-        print(f"🚀 [Init] Đang load Mask2Former ({_device})...")
-        _mask_processor = Mask2FormerImageProcessor.from_pretrained(model_name)
-        _mask_model = Mask2FormerForUniversalSegmentation.from_pretrained(model_name)
-        _mask_model.to(_device)
-        _mask_model.eval()
-    return _mask_processor, _mask_model
-
-def get_lmdb_env():
-    global _lmdb_env
-    if _lmdb_env is None:
-        if os.path.exists(LOCAL_LMDB_PATH):
-            _lmdb_env = lmdb.open(LOCAL_LMDB_PATH, readonly=True, lock=False)
-        else:
-            print(f"❌ Không tìm thấy LMDB tại: {LOCAL_LMDB_PATH}")
-            return None
-    return _lmdb_env
-
-def get_road_mask(image_numpy):
-    processor, model = get_mask_model()
-    
-    image_pil = Image.fromarray(image_numpy)
-    inputs = processor(images=image_pil, return_tensors="pt").to(_device)
-
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    pred_map = processor.post_process_semantic_segmentation(
-        outputs, target_sizes=[image_pil.size[::-1]]
-    )[0].cpu().numpy()
-    
-    raw_mask = (pred_map == 0).astype(np.uint8)
-    
-    contours, _ = cv2.findContours(raw_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return np.zeros_like(raw_mask)
-
-    largest_contour = max(contours, key=cv2.contourArea)
-    processed_mask = np.zeros_like(raw_mask)
-    cv2.drawContours(processed_mask, [largest_contour], -1, 1, -1)
-    
-    kernel = np.ones((7,7), np.uint8) 
-    processed_mask = cv2.dilate(processed_mask, kernel, iterations=3)
-    
-    return processed_mask
-
-def process_image_logic(record_key):
+from datetime import datetime
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER", "bigdataproject")
+MINIO_SECRET_KEY = os.environ.get("MINIO_ROOT_PASSWORD", "bigdataproject")
+BUCKET_CONFIGS = "configs"
+_road_masks_cache = {}
+_track_history = {}
+def get_minio_client():
+    from minio import Minio
+    return Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
+def load_road_mask(camera_id, h=720, w=1280):
+    if camera_id in _road_masks_cache:
+        return _road_masks_cache[camera_id]
+    mask = np.zeros((h, w), dtype=np.uint8)
     try:
-        env = get_lmdb_env()
-        if env is None: return {"error": "LMDB missing", "status": "failed"}
-
-        with env.begin() as txn:
-            img_bytes = txn.get(record_key.encode('ascii'))
-            
-        if img_bytes is None: return {"error": "Key missing", "status": "failed"}
-
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_bgr is None: return {"error": "Decode failed", "status": "failed"}
-        
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        h, w = img_rgb.shape[:2]
-
-        road_mask = get_road_mask(img_rgb)
-        road_area_empty = cv2.countNonZero(road_mask)
-
-        yolo_model = get_yolo_model()
-        results = yolo_model(img_bgr, verbose=False)
-        result = results[0]
-
-        mask_vehicles = np.zeros((h, w), dtype=np.uint8)
-        class_counts = {}
-
-        for box in result.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cv2.rectangle(mask_vehicles, (x1, y1), (x2, y2), 255, -1)
-            
-            cls_id = int(box.cls[0])
-            if hasattr(yolo_model.names, 'get'):
-                cls_name = yolo_model.names.get(cls_id, str(cls_id))
-            else:
-                cls_name = str(cls_id)
-                
-            class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
-
-        vehicle_area = cv2.countNonZero(mask_vehicles)
-
-        total_road_surface = vehicle_area + road_area_empty
-        
-        if total_road_surface > 0:
-            density = round(vehicle_area / total_road_surface, 4)
-        else:
-            density = 0.0
-
-        status_traffic = "Normal"
-        if density < 0.2: status_traffic = "Free"
-        elif density > 0.5: status_traffic = "Congested"
-
-        return {
-            "counts": class_counts,
-            "density": density,
-            "status": "success",
-            "traffic_status": status_traffic,
-            "metrics_debug": {
-                "road_pixels": int(road_area_empty),
-                "vehicle_pixels": int(vehicle_area)
-            }
+        client = get_minio_client()
+        mapping = {
+            "cam_01_02_03_11_12_13.json": ["cam_01", "cam_02", "cam_03", "cam_11", "cam_12", "cam_13"],
+            "cam_04_05_14_15.json": ["cam_04", "cam_05", "cam_14", "cam_15"],
+            "cam_06_07_08_16_17_18.json": ["cam_06", "cam_07", "cam_08", "cam_16", "cam_17", "cam_18"],
+            "cam_09_19.json": ["cam_09", "cam_19"],
+            "cam_10_20.json": ["cam_10", "cam_20"]
         }
-
+        target_file = next((f for f, cams in mapping.items() if camera_id in cams), None)
+        if target_file:
+            response = client.get_object(BUCKET_CONFIGS, f"road_geometry/{target_file}")
+            config_data = json.loads(response.read().decode('utf-8'))
+            for shape in config_data.get("shapes", []):
+                if shape.get("label") in ["road", camera_id]:
+                    pts = np.array(shape["points"], np.int32)
+                    cv2.fillPoly(mask, [pts], 1)
+                    _road_masks_cache[camera_id] = mask
+    except:
+        return np.ones((h, w), dtype=np.uint8)
+    return mask
+def calculate_speed_kmh(camera_id, track_id, current_pos, timestamp_str):
+    global _track_history
+    if track_id is None: return 0.0
+    combined_key = f"{camera_id}_{track_id}"
+    try:
+        t_curr = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
+    except:
+        t_curr = datetime.now().timestamp()
+    speed_kmh = 0.0
+    curr_x, curr_y = current_pos.get('x', 0), current_pos.get('y', 0)
+    if combined_key in _track_history:
+        prev = _track_history[combined_key]
+        dt = t_curr - prev['t']
+        if 0 < dt < 2.0:
+            dist = math.sqrt((curr_x - prev['x'])**2 + (curr_y - prev['y'])**2)
+            speed_kmh = (dist / dt) * 3.6
+    _track_history[combined_key] = {'x': curr_x, 'y': curr_y, 't': t_curr}
+    return float(speed_kmh)
+_seen_tracks = set()
+def process_traffic_analysis(camera_id, timestamp, objects):
+    global _seen_tracks
+    try:
+        h, w = 720, 1280
+        if not objects:
+            return json.dumps({"camera_id": camera_id, "status": "no_data", "timestamp": timestamp})
+        road_mask = load_road_mask(camera_id, h, w)
+        road_pixel_count = cv2.countNonZero(road_mask)
+        vehicle_mask = np.zeros((h, w), dtype=np.uint8)
+        label_map = {0: "motorcycle", 1: "car", 2: "bus", 3: "truck"}
+        unique_counts = {"motorcycle": 0, "car": 0, "bus": 0, "truck": 0}
+        speeds_by_type = {"motorcycle": [], "car": [], "bus": [], "truck": []}
+        world_coords = []
+        all_polygons = []
+        for row_obj in objects:
+            obj = row_obj.asDict(recursive=True) if hasattr(row_obj, "asDict") else row_obj
+            cls_name = label_map.get(obj.get('class_id'), "unknown")
+            track_id = obj.get('track_id')
+            combined_id = f"{camera_id}_{track_id}"
+            if combined_id not in _seen_tracks:
+                if cls_name in unique_counts:
+                    unique_counts[cls_name] += 1
+                _seen_tracks.add(combined_id)
+            for poly in obj.get('segmentation', []):
+                if poly: all_polygons.append(np.array(poly, np.int32))
+            curr_pos = obj.get('world_coordinates', {'x': 0, 'y': 0})
+            speed = calculate_speed_kmh(camera_id, track_id, curr_pos, timestamp)
+            if cls_name in speeds_by_type:
+                speeds_by_type[cls_name].append(speed)
+            world_coords.append([curr_pos.get('x', 0), curr_pos.get('y', 0)])
+        if all_polygons: cv2.fillPoly(vehicle_mask, all_polygons, 1)
+        overlap = cv2.bitwise_and(vehicle_mask, road_mask)
+        density_pct = (cv2.countNonZero(overlap) / road_pixel_count * 100) if road_pixel_count > 0 else 0
+        avg_speeds = {f"avg_speed_{k}": (sum(v)/len(v) if v else 0.0) for k, v in speeds_by_type.items()}
+        return json.dumps({
+            "camera_id": camera_id,
+            "timestamp": timestamp,
+            "density": {"percentage": round(density_pct, 2)},
+            "unique_counts": unique_counts,
+            "avg_speeds_frame": avg_speeds
+        })
     except Exception as e:
-        return {
-            "counts": {},
-            "density": 0.0,
-            "status": "failed",
-            "traffic_status": "Error",
-            "metrics_debug": {},
-            "error": str(e)
-        }
-
-if __name__ == "__main__":
-    TEST_KEY = "cam_01_00544" 
-    print(f"🛠️  Đang chạy test local udf_logic.py với key: {TEST_KEY}")
-    
-    result = process_image_logic(TEST_KEY)
-    
-    print("\n✅ KẾT QUẢ TEST:")
-    print(result)
+        return json.dumps({"status": "failed", "error": str(e)})
