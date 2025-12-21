@@ -28,7 +28,6 @@ spec:
               value: "my-kafka:9092"
             - name: TOPIC_NAME
               value: "traffic_data"
-            # ĐÃ SỬA: Thay đổi hostname sang my-mongodb (khớp với kết quả get svc)
             - name: MONGO_URI
               value: "mongodb://root:bigdataproject@my-mongodb.default.svc.cluster.local:27017/traffic_db?authSource=admin"
             - name: MONGO_DATABASE

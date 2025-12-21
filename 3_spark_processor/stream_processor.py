@@ -4,12 +4,10 @@ from pyspark.sql.functions import col, from_json, udf, window, avg, to_timestamp
 from pyspark.sql.types import *
 from udf_logic import process_traffic_analysis
 
-# --- 1. CONFIGURATION ---
 MONGO_URI = os.environ.get("MONGO_URI")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
 TOPIC_NAME = os.environ.get("TOPIC_NAME", "traffic_data")
 
-# --- 2. SPARK SESSION ---
 spark = SparkSession.builder \
     .appName("TrafficProcessor_v17") \
     .config("spark.mongodb.write.connection.uri", MONGO_URI) \
@@ -18,7 +16,6 @@ spark = SparkSession.builder \
 
 spark.sparkContext.setLogLevel("WARN")
 
-# --- 3. SCHEMA DEFINITION ---
 object_schema = StructType([
     StructField("track_id", IntegerType()),
     StructField("class_id", IntegerType()),
@@ -37,7 +34,6 @@ kafka_schema = StructType([
 
 process_udf = udf(process_traffic_analysis, StringType())
 
-# --- 4. STREAMING INGESTION ---
 raw_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
@@ -54,11 +50,9 @@ enriched_df = parsed_df.withColumn(
     process_udf(col("camera_id"), col("timestamp"), col("objects"))
 )
 
-# --- 5. WINDOWED AGGREGATION ---
 stream_with_ts = enriched_df.withColumn("event_time", to_timestamp(col("timestamp"))) \
     .withWatermark("event_time", "30 seconds")
 
-# Trích xuất dữ liệu unique_counts từ JSON
 processed_stats_df = stream_with_ts \
     .withColumn("density", get_json_object(col("insights_json"), "$.density.percentage").cast("float")) \
     .withColumn("m_unique", get_json_object(col("insights_json"), "$.unique_counts.motorcycle").cast("int")) \
@@ -91,7 +85,6 @@ stats_df = processed_stats_df \
         "avg_speed_motorcycle_kmh", "avg_speed_car_kmh", "avg_speed_bus_kmh", "avg_speed_truck_kmh"
     )
 
-# --- 6. WRITING TO SINKS ---
 query_per_second = enriched_df.select(col("camera_id"), col("timestamp"), col("insights_json").alias("insights")) \
     .writeStream.format("mongodb").outputMode("append") \
     .option("checkpointLocation", "/tmp/checkpoint_per_second_v17") \

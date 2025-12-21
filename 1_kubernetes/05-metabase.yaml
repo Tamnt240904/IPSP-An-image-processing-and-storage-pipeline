@@ -29,14 +29,12 @@ spec:
         env:
         - name: MB_DB_FILE
           value: "/metabase-data/metabase.db"
-        # --- PHẦN THÊM MỚI BẮT ĐẦU ---
         volumeMounts:
         - name: metabase-storage
           mountPath: /metabase-data
       volumes:
       - name: metabase-storage
         emptyDir: {}
-      # --- PHẦN THÊM MỚI KẾT THÚC ---
 ---
 apiVersion: v1
 kind: Service

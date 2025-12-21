@@ -8,10 +8,8 @@ import threading
 from kafka import KafkaProducer
 from minio import Minio
 
-# --- CẤU HÌNH ---
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
 TOPIC_NAME = "traffic_data"
-# Giả định topic có 10 partitions (0-9)
 NUM_PARTITIONS = 10 
 
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
@@ -32,12 +30,8 @@ def stream_single_camera(cam_id, lmdb_path, producer):
     """Hàm chạy trong thread riêng cho từng camera"""
     print(f"🧵 [Thread-{cam_id}] Bắt đầu stream...")
     
-    # --- LOGIC ÉP PARTITION ---
-    # cam_01 -> partition 0, cam_10 -> partition 9
     try:
         cam_num = int(cam_id.split('_')[1])
-        # Nếu cam_01 đến cam_10, ta trừ 1 để lấy index 0-9
-        # Nếu cam_11 đến cam_20, ta dùng % để quay vòng partition
         target_partition = (cam_num - 1) % NUM_PARTITIONS
     except:
         target_partition = 0
@@ -54,7 +48,6 @@ def stream_single_camera(cam_id, lmdb_path, producer):
                     label_data['timestamp'] = datetime.datetime.utcnow().isoformat()
                     label_data['camera_id'] = cam_id
                     
-                    # GỬI TIN NHẮN VỚI PARTITION CỐ ĐỊNH
                     producer.send(
                         TOPIC_NAME, 
                         key=cam_id, 
@@ -83,8 +76,8 @@ def run_producer():
         key_serializer=lambda k: k.encode('utf-8'),
         value_serializer=lambda v: json.dumps(v).encode('utf-8'),
         acks=1,
-        batch_size=65536, # Tăng batch size
-        linger_ms=10      # Giảm trễ
+        batch_size=65536,
+        linger_ms=10
     )
 
     minio_client = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
