@@ -44,15 +44,33 @@ def stream_single_camera(cam_id, lmdb_path, producer):
             for _, value in cursor:
                 try:
                     record = msgpack.unpackb(value, raw=False)
+                    
+                    # Chỉ lấy label detection (bounding box) và ảnh
                     label_data = record['label']
-                    label_data['timestamp'] = datetime.datetime.utcnow().isoformat()
-                    label_data['camera_id'] = cam_id
+                    
+                    # Tạo payload mới chỉ chứa thông tin cần thiết
+                    simplified_data = {
+                        'timestamp': datetime.datetime.utcnow().isoformat(),
+                        'camera_id': cam_id,
+                        'image': record.get('image'),  # Lấy ảnh
+                        'objects': []
+                    }
+                    
+                    # Chỉ lấy thông tin detection (bounding box)
+                    if 'objects' in label_data:
+                        for obj in label_data['objects']:
+                            detection_obj = {
+                                'track_id': obj.get('track_id'),
+                                'class_id': obj.get('class_id'),
+                                'bbox': obj.get('bbox')  # Chỉ lấy bounding box
+                            }
+                            simplified_data['objects'].append(detection_obj)
                     
                     producer.send(
                         TOPIC_NAME, 
                         key=cam_id, 
-                        value=label_data,
-                        partition=target_partition # Ép đúng partition
+                        value=simplified_data,
+                        partition=target_partition
                     )
                     
                     count += 1
