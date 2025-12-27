@@ -3,7 +3,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN pip install kafka-python minio lmdb msgpack
+RUN pip install kafka-python minio lmdb msgpack numpy
 
 COPY kafka_producer.py .
 
