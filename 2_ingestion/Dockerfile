@@ -5,6 +5,6 @@ WORKDIR /app
 
 RUN pip install kafka-python minio lmdb msgpack numpy
 
-COPY producer.py .
+COPY kafka_producer.py .
 
 CMD ["python", "producer.py"]
