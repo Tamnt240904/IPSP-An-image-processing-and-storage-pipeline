@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yolo-training-batch
+spec:
+  template:
+    metadata:
+      labels:
+        app: yolo-training-batch
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: yolo-trainer
+        image: anvu1204/yolo-training-batch:v1
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+            # Uncomment below to request GPU (requires GPU nodes in cluster)
+            # nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+            # Uncomment below to limit GPU usage (requires GPU nodes in cluster)
+            # nvidia.com/gpu: 1
+        env:
+          # Kafka Configuration
+          - name: KAFKA_BROKER
+            value: "my-kafka:9092"
+          - name: TOPIC_NAME
+            value: "traffic_data"
+          
+          # MinIO Configuration
+          - name: MINIO_ENDPOINT
+            value: "my-minio:9000"
+          - name: MINIO_ACCESS_KEY
+            value: "bigdataproject"
+          - name: MINIO_SECRET_KEY
+            value: "bigdataproject"
+          - name: MINIO_BUCKET
+            value: "configs"
+          - name: MINIO_SECURE
+            value: "false"
+          
+          # Spark Configuration
+          - name: SPARK_MASTER
+            value: "local[*]"
+          - name: SPARK_APP_NAME
+            value: "YOLO_Training_Batch"
+          
+          # Training Configuration
+          - name: BATCH_SIZE
+            value: "16"
+          - name: EPOCHS
+            value: "5"
+          - name: IMG_SIZE
+            value: "640"
+          - name: MODEL_SIZE
+            value: "yolov8n.pt"
+          - name: DATA_DIR
+            value: "/tmp/yolo_training_data"
+          - name: OUTPUT_DIR
+            value: "/tmp/yolo_training_output"
+  backoffLimit: 1  # Retry once if job fails
+  ttlSecondsAfterFinished: 3600  # Delete job 1 hour after completion
+

@@ -16,4 +16,4 @@ COPY . .
 CMD ["/opt/spark/bin/spark-submit", \
     "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.mongodb.spark:mongo-spark-connector_2.12:10.2.1", \
     "--conf", "spark.sql.execution.pythonUDF.arrow.enabled=false", \
-    "stream_processor.py"]
+    "main.py"]

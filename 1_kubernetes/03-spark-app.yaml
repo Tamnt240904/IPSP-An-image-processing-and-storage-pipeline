@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: spark-processor
-          image: laidung/traffic-spark-app:v17
+          image: anvu1204/traffic-spark-app:v17
           imagePullPolicy: Always
           resources:
             requests:

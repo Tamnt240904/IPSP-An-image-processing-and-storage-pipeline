@@ -2,7 +2,7 @@ import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, udf, window, avg, to_timestamp, get_json_object, explode, sum as _sum
 from pyspark.sql.types import *
-from udf_logic import process_traffic_analysis
+from util import process_traffic_analysis
 
 MONGO_URI = os.environ.get("MONGO_URI")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")

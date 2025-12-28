@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: producer
-        image: laidung/traffic-producer:v6
+        image: anvu1204/traffic-producer:v6
         imagePullPolicy: Always
         env:
         - name: KAFKA_BROKER
