@@ -13,11 +13,22 @@ from minio_uploader import MinIOUploader
 
 def create_spark_session() -> SparkSession:
     """Create and configure Spark session"""
+    # Get available memory (default to 6Gi if not set, leaving some for system)
+    import os
+    available_memory = os.environ.get("SPARK_DRIVER_MEMORY", "6g")
+    
     spark = SparkSession.builder \
         .appName(Config.SPARK_APP_NAME) \
         .master(Config.SPARK_MASTER) \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.driver.memory", available_memory) \
+        .config("spark.driver.maxResultSize", "2g") \
+        .config("spark.executor.memory", available_memory) \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
+        .config("spark.sql.execution.pythonUDF.arrow.enabled", "false") \
+        .config("spark.network.timeout", "800s") \
+        .config("spark.executor.heartbeatInterval", "60s") \
         .getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")

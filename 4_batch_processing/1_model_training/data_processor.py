@@ -187,6 +187,7 @@ class YOLODataProcessor:
     def process_dataframe(self, df: DataFrame) -> int:
         """
         Process entire DataFrame and convert to YOLO format
+        Uses foreachPartition to process data in a distributed manner without collecting to driver
         
         Args:
             df: Spark DataFrame with Kafka data
@@ -194,7 +195,6 @@ class YOLODataProcessor:
         Returns:
             Number of successfully processed images
         """
-        count = 0
         total_count = df.count()
         
         if total_count == 0:
@@ -203,17 +203,117 @@ class YOLODataProcessor:
         
         print(f"Processing {total_count} images...")
         
-        # Collect all rows and process
-        # Note: For very large datasets, consider processing in chunks
-        rows = df.collect()
+        # Use accumulator to track processed count across partitions
+        # Broadcast data_dir paths to all executors
+        from pyspark import AccumulatorParam
         
-        for row in rows:
-            if self.process_row(row):
-                count += 1
+        class IntAccumulatorParam(AccumulatorParam):
+            def zero(self, initialValue):
+                return 0
+            def addInPlace(self, v1, v2):
+                return v1 + v2
+        
+        processed_count_acc = self.spark.sparkContext.accumulator(0, IntAccumulatorParam())
+        
+        # Broadcast directory paths to ensure all partitions can access them
+        images_dir_bc = self.spark.sparkContext.broadcast(str(self.images_dir))
+        labels_dir_bc = self.spark.sparkContext.broadcast(str(self.labels_dir))
+        
+        def process_partition(partition):
+            """Process a partition of rows"""
+            # Import required modules (needed for serialization)
+            import os
+            import base64 as b64
+            import io
+            from pathlib import Path as PPath
+            from PIL import Image
             
-            if count % 100 == 0:
-                print(f"Processed {count}/{total_count} images...")
+            # Ensure directories exist in this partition
+            os.makedirs(images_dir_bc.value, exist_ok=True)
+            os.makedirs(labels_dir_bc.value, exist_ok=True)
+            
+            partition_count = 0
+            partition_total = 0
+            
+            for row in partition:
+                partition_total += 1
+                try:
+                    image_id = row.image_id if hasattr(row, 'image_id') else str(row['image_id'])
+                    image_base64 = row.image if hasattr(row, 'image') else row['image']
+                    objects = row.objects if hasattr(row, 'objects') and row.objects else (row.get('objects', []) if isinstance(row, dict) else [])
+                    
+                    if not image_base64:
+                        continue
+                    
+                    # Decode and save image (inline to avoid serialization issues)
+                    try:
+                        image_bytes = b64.b64decode(image_base64)
+                        image = Image.open(io.BytesIO(image_bytes))
+                        
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        
+                        image_path = PPath(images_dir_bc.value) / f"{image_id}.jpg"
+                        image.save(image_path, "JPEG")
+                    except Exception as e:
+                        print(f"Error decoding image {image_id}: {e}")
+                        continue
+                    
+                    # Convert objects to list of dicts
+                    objects_list = []
+                    if objects:
+                        for obj in objects:
+                            if hasattr(obj, 'asDict'):
+                                obj_dict = obj.asDict()
+                            elif hasattr(obj, '__dict__'):
+                                obj_dict = obj.__dict__
+                            elif isinstance(obj, dict):
+                                obj_dict = obj
+                            else:
+                                continue
+                            
+                            objects_list.append({
+                                'class_id': int(obj_dict.get('class_id', 0)),
+                                'bbox': obj_dict.get('bbox', [])
+                            })
+                    
+                    # Create label file (inline to avoid serialization issues)
+                    try:
+                        label_path = PPath(labels_dir_bc.value) / f"{image_id}.txt"
+                        with open(label_path, 'w') as f:
+                            for obj in objects_list:
+                                try:
+                                    class_id = int(obj.get('class_id', 0))
+                                    bbox = obj.get('bbox', [])
+                                    
+                                    if bbox and len(bbox) == 4:
+                                        bbox = [float(x) for x in bbox]
+                                        bbox = [max(0.0, min(1.0, x)) for x in bbox]
+                                        f.write(f"{class_id} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n")
+                                except (ValueError, TypeError, IndexError) as e:
+                                    print(f"Error processing object in {image_id}: {e}")
+                                    continue
+                    except Exception as e:
+                        print(f"Error creating label file for {image_id}: {e}")
+                        continue
+                    
+                    partition_count += 1
+                    
+                except Exception as e:
+                    print(f"Error processing row in partition: {e}")
+                    continue
+                
+                # Print progress every 50 images in this partition
+                if partition_total % 50 == 0:
+                    print(f"Partition progress: {partition_total} rows processed, {partition_count} successful")
+            
+            # Update accumulator
+            processed_count_acc.add(partition_count)
         
+        # Process data in partitions (distributed, no collect to driver)
+        df.foreachPartition(process_partition)
+        
+        count = processed_count_acc.value
         print(f"Successfully processed {count}/{total_count} images")
         return count
     
