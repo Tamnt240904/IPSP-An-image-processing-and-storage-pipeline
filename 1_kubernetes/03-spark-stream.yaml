@@ -14,15 +14,15 @@ spec:
     spec:
       containers:
         - name: spark-processor
-          image: laidung/traffic-spark-app:v18
+          image: laidung/traffic-spark-app:v1
           imagePullPolicy: Always
           resources:
             requests:
               memory: "1Gi"
               cpu: "500m"
             limits:
-              memory: "2Gi"
-              cpu: "1000m"
+              memory: "4Gi"
+              cpu: "2000m"
           env:
             - name: KAFKA_BROKER
               value: "my-kafka:9092"
@@ -30,9 +30,13 @@ spec:
               value: "traffic_data"
             - name: MONGO_URI
               value: "mongodb://root:bigdataproject@my-mongodb.default.svc.cluster.local:27017/traffic_db?authSource=admin"
-            - name: MONGO_DATABASE
-              value: "traffic_db"
-            - name: MONGO_COLLECTION
-              value: "insights"
+            
+            - name: MINIO_ENDPOINT
+              value: "my-minio:9000"
+            - name: MINIO_ROOT_USER
+              value: "bigdataproject"
+            - name: MINIO_ROOT_PASSWORD
+              value: "bigdataproject"
+              
             - name: SPARK_MASTER
               value: "local[*]"

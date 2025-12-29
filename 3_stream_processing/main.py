@@ -1,29 +1,28 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, udf, window, avg, to_timestamp, get_json_object, explode, sum as _sum
+from pyspark.sql.functions import col, from_json, udf, window, avg, to_timestamp, get_json_object, sum as _sum
 from pyspark.sql.types import *
 from util import process_traffic_analysis
 
+# --- CẤU HÌNH ---
 MONGO_URI = os.environ.get("MONGO_URI")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
 TOPIC_NAME = os.environ.get("TOPIC_NAME", "traffic_data")
 
+# --- KHỞI TẠO SPARK ---
 spark = SparkSession.builder \
-    .appName("TrafficProcessor_v17") \
+    .appName("sparkstreaming_v1") \
     .config("spark.mongodb.write.connection.uri", MONGO_URI) \
     .config("spark.mongodb.write.database", "traffic_db") \
+    .config("spark.driver.memory", "2g") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
 
+# --- SCHEMAS ---
 object_schema = StructType([
-    StructField("track_id", IntegerType()),
     StructField("class_id", IntegerType()),
-    StructField("world_coordinates", StructType([
-        StructField("x", FloatType()),
-        StructField("y", FloatType())
-    ])),
-    StructField("segmentation", ArrayType(ArrayType(ArrayType(IntegerType()))))
+    StructField("bbox", ArrayType(FloatType())) 
 ])
 
 kafka_schema = StructType([
@@ -32,27 +31,34 @@ kafka_schema = StructType([
     StructField("objects", ArrayType(object_schema))
 ])
 
+# --- UDF ---
 process_udf = udf(process_traffic_analysis, StringType())
 
+# --- 1. ĐỌC DỮ LIỆU TỪ KAFKA (QUAN TRỌNG: Sửa thành earliest) ---
 raw_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
     .option("subscribe", TOPIC_NAME) \
     .option("startingOffsets", "earliest") \
+    .option("failOnDataLoss", "false") \
     .load()
 
+# Parse JSON từ Kafka
 parsed_df = raw_df.select(
     from_json(col("value").cast("string"), kafka_schema).alias("data")
 ).select("data.*")
 
+# --- 2. XỬ LÝ ẢNH & TÍNH TOÁN ---
 enriched_df = parsed_df.withColumn(
     "insights_json",
     process_udf(col("camera_id"), col("timestamp"), col("objects"))
 )
 
+# Tạo Event Time & Watermark
 stream_with_ts = enriched_df.withColumn("event_time", to_timestamp(col("timestamp"))) \
     .withWatermark("event_time", "30 seconds")
 
+# Tách JSON string thành các cột số liệu cụ thể
 processed_stats_df = stream_with_ts \
     .withColumn("density", get_json_object(col("insights_json"), "$.density.percentage").cast("float")) \
     .withColumn("m_unique", get_json_object(col("insights_json"), "$.unique_counts.motorcycle").cast("int")) \
@@ -64,6 +70,8 @@ processed_stats_df = stream_with_ts \
     .withColumn("b_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_bus").cast("float")) \
     .withColumn("t_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_truck").cast("float"))
 
+# --- 3. AGGREGATION (Sửa window giống Code 1) ---
+# Window 1 phút, trượt 30 giây (Sliding Window)
 stats_df = processed_stats_df \
     .groupBy(window(col("event_time"), "1 minute", "30 seconds"), col("camera_id")) \
     .agg(
@@ -86,13 +94,19 @@ stats_df = processed_stats_df \
     )
 
 query_per_second = enriched_df.select(col("camera_id"), col("timestamp"), col("insights_json").alias("insights")) \
-    .writeStream.format("mongodb").outputMode("append") \
-    .option("checkpointLocation", "/tmp/checkpoint_per_second_v17") \
-    .option("spark.mongodb.write.collection", "traffic_per_second").start()
+    .writeStream \
+    .format("mongodb") \
+    .outputMode("append") \
+    .option("checkpointLocation", "/tmp/checkpoint_per_second_v1") \
+    .option("spark.mongodb.write.collection", "traffic_per_second") \
+    .start()
 
 query_per_minute = stats_df \
-    .writeStream.format("mongodb").outputMode("complete") \
-    .option("checkpointLocation", "/tmp/checkpoint_per_minute_v17") \
-    .option("spark.mongodb.write.collection", "traffic_per_minute").start()
+    .writeStream \
+    .format("mongodb") \
+    .outputMode("complete") \
+    .option("checkpointLocation", "/tmp/checkpoint_per_minute_v1") \
+    .option("spark.mongodb.write.collection", "traffic_per_minute") \
+    .start()
 
 spark.streams.awaitAnyTermination()

@@ -4,18 +4,27 @@ import json
 import math
 import os
 from datetime import datetime
+
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ROOT_USER", "bigdataproject")
 MINIO_SECRET_KEY = os.environ.get("MINIO_ROOT_PASSWORD", "bigdataproject")
 BUCKET_CONFIGS = "configs"
+
 _road_masks_cache = {}
-_track_history = {}
+
+_prev_frame_state = {}
+
+IMG_W, IMG_H = 1280, 720
+PIXELS_PER_METER = 20.0 
+MAX_MATCH_DIST = 150.0   
 def get_minio_client():
     from minio import Minio
     return Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY, secure=False)
+
 def load_road_mask(camera_id, h=720, w=1280):
     if camera_id in _road_masks_cache:
         return _road_masks_cache[camera_id]
+    
     mask = np.zeros((h, w), dtype=np.uint8)
     try:
         client = get_minio_client()
@@ -34,69 +43,120 @@ def load_road_mask(camera_id, h=720, w=1280):
                 if shape.get("label") in ["road", camera_id]:
                     pts = np.array(shape["points"], np.int32)
                     cv2.fillPoly(mask, [pts], 1)
-                    _road_masks_cache[camera_id] = mask
-    except:
+        
+        _road_masks_cache[camera_id] = mask
+    except Exception as e:
+        print(f"Error loading mask for {camera_id}: {e}")
         return np.ones((h, w), dtype=np.uint8)
     return mask
-def calculate_speed_kmh(camera_id, track_id, current_pos, timestamp_str):
-    global _track_history
-    if track_id is None: return 0.0
-    combined_key = f"{camera_id}_{track_id}"
+
+def process_traffic_analysis(camera_id, timestamp_str, objects):
+    global _prev_frame_state
+    
     try:
-        t_curr = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00')).timestamp()
-    except:
-        t_curr = datetime.now().timestamp()
-    speed_kmh = 0.0
-    curr_x, curr_y = current_pos.get('x', 0), current_pos.get('y', 0)
-    if combined_key in _track_history:
-        prev = _track_history[combined_key]
-        dt = t_curr - prev['t']
-        if 0 < dt < 2.0:
-            dist = math.sqrt((curr_x - prev['x'])**2 + (curr_y - prev['y'])**2)
-            speed_kmh = (dist / dt) * 3.6
-    _track_history[combined_key] = {'x': curr_x, 'y': curr_y, 't': t_curr}
-    return float(speed_kmh)
-_seen_tracks = set()
-def process_traffic_analysis(camera_id, timestamp, objects):
-    global _seen_tracks
-    try:
-        h, w = 720, 1280
+        try:
+            ts_clean = timestamp_str.replace('Z', '+00:00')
+            t_curr = datetime.fromisoformat(ts_clean).timestamp()
+        except:
+            t_curr = datetime.now().timestamp()
+
         if not objects:
-            return json.dumps({"camera_id": camera_id, "status": "no_data", "timestamp": timestamp})
-        road_mask = load_road_mask(camera_id, h, w)
+            return json.dumps({
+                "camera_id": camera_id, "timestamp": timestamp_str,
+                "density": {"percentage": 0.0},
+                "unique_counts": {"motorcycle": 0, "car": 0, "bus": 0, "truck": 0},
+                "avg_speeds_frame": {"avg_speed_motorcycle": 0.0, "avg_speed_car": 0.0, "avg_speed_bus": 0.0, "avg_speed_truck": 0.0}
+            })
+
+        road_mask = load_road_mask(camera_id, IMG_H, IMG_W)
         road_pixel_count = cv2.countNonZero(road_mask)
-        vehicle_mask = np.zeros((h, w), dtype=np.uint8)
+        vehicle_mask = np.zeros((IMG_H, IMG_W), dtype=np.uint8)
+        
         label_map = {0: "motorcycle", 1: "car", 2: "bus", 3: "truck"}
         unique_counts = {"motorcycle": 0, "car": 0, "bus": 0, "truck": 0}
-        speeds_by_type = {"motorcycle": [], "car": [], "bus": [], "truck": []}
-        world_coords = []
-        all_polygons = []
+        speeds_list = {"motorcycle": [], "car": [], "bus": [], "truck": []}
+        
+        # Lấy dữ liệu frame trước để so sánh
+        prev_data = _prev_frame_state.get(camera_id)
+        prev_objects = prev_data['objects'] if prev_data else []
+        t_prev = prev_data['timestamp'] if prev_data else 0
+        dt = t_curr - t_prev
+        
+        if dt > 2.0 or dt <= 0:
+            prev_objects = []
+            dt = 0
+
+        curr_frame_objects_save = [] 
         for row_obj in objects:
-            obj = row_obj.asDict(recursive=True) if hasattr(row_obj, "asDict") else row_obj
-            cls_name = label_map.get(obj.get('class_id'), "unknown")
-            track_id = obj.get('track_id')
-            combined_id = f"{camera_id}_{track_id}"
-            if combined_id not in _seen_tracks:
-                if cls_name in unique_counts:
-                    unique_counts[cls_name] += 1
-                _seen_tracks.add(combined_id)
-            for poly in obj.get('segmentation', []):
-                if poly: all_polygons.append(np.array(poly, np.int32))
-            curr_pos = obj.get('world_coordinates', {'x': 0, 'y': 0})
-            speed = calculate_speed_kmh(camera_id, track_id, curr_pos, timestamp)
-            if cls_name in speeds_by_type:
-                speeds_by_type[cls_name].append(speed)
-            world_coords.append([curr_pos.get('x', 0), curr_pos.get('y', 0)])
-        if all_polygons: cv2.fillPoly(vehicle_mask, all_polygons, 1)
+            obj = row_obj.asDict() if hasattr(row_obj, "asDict") else row_obj
+            cls_id = obj.get('class_id')
+            bbox = obj.get('bbox')
+            
+            cls_name = label_map.get(cls_id, "unknown")
+
+            if bbox and len(bbox) == 4:
+                nx, ny, nw, nh = bbox
+                w_px, h_px = int(nw * IMG_W), int(nh * IMG_H)
+                cx_px, cy_px = int(nx * IMG_W), int(ny * IMG_H)
+                
+                x1 = int(cx_px - w_px/2)
+                y1 = int(cy_px - h_px/2)
+                x2 = x1 + w_px
+                y2 = y1 + h_px
+                
+                cv2.rectangle(vehicle_mask, (x1, y1), (x2, y2), 1, -1)
+                
+                curr_obj_data = {"class_id": cls_id, "center": (cx_px, cy_px)}
+                curr_frame_objects_save.append(curr_obj_data)
+                
+                speed_kmh = 0.0
+                matched = False
+                
+                if prev_objects and dt > 0:
+                    min_dist = float('inf')
+                    best_match_idx = -1
+                    
+                    for idx, p_obj in enumerate(prev_objects):
+                        if p_obj['class_id'] == cls_id:
+                            dist = math.sqrt((cx_px - p_obj['center'][0])**2 + (cy_px - p_obj['center'][1])**2)
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_match_idx = idx
+                    
+                    if min_dist < MAX_MATCH_DIST and best_match_idx != -1:
+                        matched = True
+                        dist_meters = min_dist / PIXELS_PER_METER
+                        speed_mps = dist_meters / dt
+                        speed_kmh = speed_mps * 3.6
+                        
+                        prev_objects.pop(best_match_idx)
+
+                if matched:
+                    if cls_name in speeds_list:
+                        speeds_list[cls_name].append(speed_kmh)
+                else:
+                    if cls_name in unique_counts:
+                        unique_counts[cls_name] += 1
+                    if cls_name in speeds_list:
+                        speeds_list[cls_name].append(0.0)
+
         overlap = cv2.bitwise_and(vehicle_mask, road_mask)
         density_pct = (cv2.countNonZero(overlap) / road_pixel_count * 100) if road_pixel_count > 0 else 0
-        avg_speeds = {f"avg_speed_{k}": (sum(v)/len(v) if v else 0.0) for k, v in speeds_by_type.items()}
+        
+        avg_speeds = {f"avg_speed_{k}": (sum(v)/len(v) if v else 0.0) for k, v in speeds_list.items()}
+        
+        _prev_frame_state[camera_id] = {
+            "timestamp": t_curr,
+            "objects": curr_frame_objects_save
+        }
+
         return json.dumps({
             "camera_id": camera_id,
-            "timestamp": timestamp,
+            "timestamp": timestamp_str,
             "density": {"percentage": round(density_pct, 2)},
             "unique_counts": unique_counts,
             "avg_speeds_frame": avg_speeds
         })
+
     except Exception as e:
-        return json.dumps({"status": "failed", "error": str(e)})
+        return json.dumps({"status": "failed", "error": str(e), "timestamp": timestamp_str})

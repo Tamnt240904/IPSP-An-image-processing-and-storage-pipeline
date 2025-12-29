@@ -18,10 +18,12 @@ MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
 MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "bigdataproject") 
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "bigdataproject")
 BUCKET_NAME = "traffic-data"
-MINIO_PREFIX = "lmdb"
+MINIO_PREFIX = "lambda_lmdb"
 
 CAM_MODE = os.environ.get("CAM_MODE", "dev").lower()
-FPS = 5 
+
+# Đã sửa thành 1 để mô phỏng 1s bắn 1 bản tin
+FPS = 1 
 
 def get_target_cameras():
     if CAM_MODE == "demo":
@@ -70,8 +72,13 @@ def stream_single_camera(cam_id, lmdb_path, producer):
                         }
                         objects.append(obj)
                     
+                    # --- THAY ĐỔI: Lấy thời gian hiện tại ---
+                    current_timestamp = datetime.datetime.now().isoformat()
+                    # ----------------------------------------
+
                     payload = {
                         'camera_id': cam_id,
+                        'timestamp': current_timestamp, # Thêm trường timestamp vào payload
                         'image_id': frame_key,
                         'image': image_base64,
                         'objects': objects
@@ -86,7 +93,7 @@ def stream_single_camera(cam_id, lmdb_path, producer):
                     
                     count += 1
                     if count % 50 == 0:
-                        print(f"📡 {cam_id} -> Partition {target_partition}: đã gửi {count} frames")
+                        print(f"📡 {cam_id} -> Partition {target_partition}: đã gửi {count} frames. Time: {current_timestamp}")
                     
                     time.sleep(1.0 / FPS)
                     
