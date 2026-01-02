@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: metabase-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi 
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,7 +45,8 @@ spec:
           mountPath: /metabase-data
       volumes:
       - name: metabase-storage
-        emptyDir: {}
+        persistentVolumeClaim:
+          claimName: metabase-pvc
 ---
 apiVersion: v1
 kind: Service

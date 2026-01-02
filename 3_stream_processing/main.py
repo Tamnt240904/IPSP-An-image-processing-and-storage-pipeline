@@ -1,17 +1,15 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, udf, window, avg, to_timestamp, get_json_object, sum as _sum
+from pyspark.sql.functions import col, from_json, udf, get_json_object
 from pyspark.sql.types import *
 from util import process_traffic_analysis
 
-# --- CẤU HÌNH ---
-MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://admin:password@mongo-service:27017")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
 TOPIC_NAME = os.environ.get("TOPIC_NAME", "traffic_data")
 
-# --- KHỞI TẠO SPARK ---
 spark = SparkSession.builder \
-    .appName("sparkstreaming_v1") \
+    .appName("StreamProcessor_v2") \
     .config("spark.mongodb.write.connection.uri", MONGO_URI) \
     .config("spark.mongodb.write.database", "traffic_db") \
     .config("spark.driver.memory", "2g") \
@@ -19,7 +17,6 @@ spark = SparkSession.builder \
 
 spark.sparkContext.setLogLevel("WARN")
 
-# --- SCHEMAS ---
 object_schema = StructType([
     StructField("class_id", IntegerType()),
     StructField("bbox", ArrayType(FloatType())) 
@@ -28,85 +25,55 @@ object_schema = StructType([
 kafka_schema = StructType([
     StructField("camera_id", StringType()),
     StructField("timestamp", StringType()),
+    StructField("image_id", StringType()),
     StructField("objects", ArrayType(object_schema))
 ])
 
-# --- UDF ---
 process_udf = udf(process_traffic_analysis, StringType())
 
-# --- 1. ĐỌC DỮ LIỆU TỪ KAFKA (QUAN TRỌNG: Sửa thành earliest) ---
 raw_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
     .option("subscribe", TOPIC_NAME) \
-    .option("startingOffsets", "earliest") \
+    .option("startingOffsets", "latest") \
     .option("failOnDataLoss", "false") \
     .load()
 
-# Parse JSON từ Kafka
 parsed_df = raw_df.select(
     from_json(col("value").cast("string"), kafka_schema).alias("data")
 ).select("data.*")
 
-# --- 2. XỬ LÝ ẢNH & TÍNH TOÁN ---
 enriched_df = parsed_df.withColumn(
     "insights_json",
     process_udf(col("camera_id"), col("timestamp"), col("objects"))
 )
 
-# Tạo Event Time & Watermark
-stream_with_ts = enriched_df.withColumn("event_time", to_timestamp(col("timestamp"))) \
-    .withWatermark("event_time", "30 seconds")
+final_df = enriched_df.select(
+    col("camera_id"),
+    col("timestamp"),
+    
+    get_json_object(col("insights_json"), "$.traffic_status").alias("traffic_status"),
+    get_json_object(col("insights_json"), "$.density").cast("float").alias("density"),
+    get_json_object(col("insights_json"), "$.alert_message").alias("alert_message"),
 
-# Tách JSON string thành các cột số liệu cụ thể
-processed_stats_df = stream_with_ts \
-    .withColumn("density", get_json_object(col("insights_json"), "$.density.percentage").cast("float")) \
-    .withColumn("m_unique", get_json_object(col("insights_json"), "$.unique_counts.motorcycle").cast("int")) \
-    .withColumn("c_unique", get_json_object(col("insights_json"), "$.unique_counts.car").cast("int")) \
-    .withColumn("b_unique", get_json_object(col("insights_json"), "$.unique_counts.bus").cast("int")) \
-    .withColumn("t_unique", get_json_object(col("insights_json"), "$.unique_counts.truck").cast("int")) \
-    .withColumn("m_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_motorcycle").cast("float")) \
-    .withColumn("c_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_car").cast("float")) \
-    .withColumn("b_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_bus").cast("float")) \
-    .withColumn("t_speed", get_json_object(col("insights_json"), "$.avg_speeds_frame.avg_speed_truck").cast("float"))
+    get_json_object(col("insights_json"), "$.counts.motorbike").cast("int").alias("count_motorbike"),
+    get_json_object(col("insights_json"), "$.counts.car").cast("int").alias("count_car"),
+    get_json_object(col("insights_json"), "$.counts.bus").cast("int").alias("count_bus"),
+    get_json_object(col("insights_json"), "$.counts.container").cast("int").alias("count_container"),
 
-# --- 3. AGGREGATION (Sửa window giống Code 1) ---
-# Window 1 phút, trượt 30 giây (Sliding Window)
-stats_df = processed_stats_df \
-    .groupBy(window(col("event_time"), "1 minute", "30 seconds"), col("camera_id")) \
-    .agg(
-        avg("density").alias("avg_density_pct"),
-        _sum("m_unique").alias("unique_motorcycle_count"),
-        _sum("c_unique").alias("unique_car_count"),
-        _sum("b_unique").alias("unique_bus_count"),
-        _sum("t_unique").alias("unique_truck_count"),
-        avg("m_speed").alias("avg_speed_motorcycle_kmh"),
-        avg("c_speed").alias("avg_speed_car_kmh"),
-        avg("b_speed").alias("avg_speed_bus_kmh"),
-        avg("t_speed").alias("avg_speed_truck_kmh")
-    ) \
-    .select(
-        col("window.start").alias("start_time"),
-        col("camera_id"),
-        "avg_density_pct",
-        "unique_motorcycle_count", "unique_car_count", "unique_bus_count", "unique_truck_count",
-        "avg_speed_motorcycle_kmh", "avg_speed_car_kmh", "avg_speed_bus_kmh", "avg_speed_truck_kmh"
-    )
+    get_json_object(col("insights_json"), "$.speeds.motorbike").cast("float").alias("speed_motorbike"),
+    get_json_object(col("insights_json"), "$.speeds.car").cast("float").alias("speed_car"),
+    get_json_object(col("insights_json"), "$.speeds.bus").cast("float").alias("speed_bus"),
+    get_json_object(col("insights_json"), "$.speeds.container").cast("float").alias("speed_container")
+)
 
-query_per_second = enriched_df.select(col("camera_id"), col("timestamp"), col("insights_json").alias("insights")) \
+query_monitor = final_df \
     .writeStream \
     .format("mongodb") \
     .outputMode("append") \
-    .option("checkpointLocation", "/tmp/checkpoint_per_second_v1") \
-    .option("spark.mongodb.write.collection", "traffic_per_second") \
+    .option("checkpointLocation", "/tmp/checkpoint_stream_v2") \
+    .option("spark.mongodb.write.collection", "realtime_monitor") \
+    .trigger(processingTime='15 seconds') \
     .start()
 
-query_per_minute = stats_df \
-    .writeStream \
-    .format("mongodb") \
-    .outputMode("complete") \
-    .option("checkpointLocation", "/tmp/checkpoint_per_minute_v1") \
-    .option("spark.mongodb.write.collection", "traffic_per_minute") \
-    .start()
-
-spark.streams.awaitAnyTermination()
+query_monitor.awaitTermination()
