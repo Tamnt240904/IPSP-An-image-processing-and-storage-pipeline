@@ -1,6 +1,3 @@
-"""
-Inference processing module for YOLO tracking and traffic insights
-"""
 import os
 import json
 import base64

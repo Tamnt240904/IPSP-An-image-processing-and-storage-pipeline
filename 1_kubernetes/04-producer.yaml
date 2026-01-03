@@ -1,17 +1,17 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: traffic-producer
+  name: producer
 spec:
   template:
     metadata:
       labels:
-        app: traffic-producer
+        app: producer
     spec:
       restartPolicy: Never
       containers:
       - name: producer
-        image: laidung/traffic-producer:v1
+        image: laidung/producer:v1
         imagePullPolicy: Always
         env:
         - name: KAFKA_BROKER

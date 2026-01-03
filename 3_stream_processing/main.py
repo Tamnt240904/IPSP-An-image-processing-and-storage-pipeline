@@ -9,7 +9,7 @@ KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
 TOPIC_NAME = os.environ.get("TOPIC_NAME", "traffic_data")
 
 spark = SparkSession.builder \
-    .appName("StreamProcessor_v2") \
+    .appName("spark_stream_v1") \
     .config("spark.mongodb.write.connection.uri", MONGO_URI) \
     .config("spark.mongodb.write.database", "traffic_db") \
     .config("spark.driver.memory", "2g") \
@@ -71,7 +71,7 @@ query_monitor = final_df \
     .writeStream \
     .format("mongodb") \
     .outputMode("append") \
-    .option("checkpointLocation", "/tmp/checkpoint_stream_v2") \
+    .option("checkpointLocation", "/tmp/checkpoint_spark_stream_v1") \
     .option("spark.mongodb.write.collection", "realtime_monitor") \
     .trigger(processingTime='15 seconds') \
     .start()
