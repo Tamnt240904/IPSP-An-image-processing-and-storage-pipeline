@@ -26,7 +26,7 @@ RUN pip3 install --no-cache-dir \
 RUN pip3 install --no-cache-dir pyspark==3.4.1
 
 RUN mkdir -p /app/models
-COPY models/yolov8.pt /app/models/yolov8.pt
+COPY ./models/yolov8.pt /app/models/yolov8.pt
 
 COPY . .
 

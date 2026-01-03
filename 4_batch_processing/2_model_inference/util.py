@@ -20,7 +20,8 @@ from minio import Minio
 import pandas as pd
 from datetime import timedelta
 
-class InferenceProcessor:  
+class InferenceProcessor:
+
     def __init__(self, spark: SparkSession, minio_endpoint: str, minio_access_key: str, minio_secret_key: str, minio_bucket: str, model_path: str = "/app/models/yolov8.pt"):
         self.spark = spark
         self.minio_client = Minio(minio_endpoint, access_key=minio_access_key, secret_key=minio_secret_key, secure=False)
@@ -174,4 +175,59 @@ class InferenceProcessor:
                 overlap_area = intersection.area
                 
                 u_center = (x1 + x2) / 2
-                v_bottom
+                v_bottom = y2
+                world = cv2.perspectiveTransform(np.float32([[u_center, v_bottom]]), self.H_matrix)[0][0]
+                world_x, world_y = float(world[0]), float(world[1])
+                
+                output_rows.append({
+                    "camera_id": camera_id,
+                    "timestamp": row["timestamp"],
+                    "class_id": class_id,
+                    "track_id": track_id,
+                    "world_x": world_x,
+                    "world_y": world_y,
+                    "overlap_area": overlap_area if overlap_area > 0 else 0.0,
+                    "bbox_area": (x2 - x1) * (y2 - y1)
+                })
+                
+                if track_id not in track_positions:
+                    track_positions[track_id] = []
+                track_positions[track_id].append((row["timestamp"], world_x, world_y, class_id))
+        
+        for track_id, pos_list in track_positions.items():
+            if len(pos_list) < 2:
+                continue
+            pos_list.sort(key=lambda p: p[0])
+            speeds = []
+            for j in range(1, len(pos_list)):
+                ts1, x1, y1, _ = pos_list[j-1]
+                ts2, x2, y2, _ = pos_list[j]
+                dt = (ts2 - ts1).total_seconds()
+                if dt <= 0:
+                    dt = 1.0
+                dist_km = np.sqrt((x2 - x1)**2 + (y2 - y1)**2) / 1000.0
+                speed_kmh = dist_km / (dt / 3600.0)
+                speeds.append(speed_kmh)
+            avg_speed = np.mean(speeds) if speeds else 0.0
+            
+            for row in output_rows:
+                if row["track_id"] == track_id:
+                    row["avg_speed"] = avg_speed
+        
+        return pd.DataFrame(output_rows)
+    
+    def process_dataframe(self, df: DataFrame) -> DataFrame:
+        output_schema = StructType([
+            StructField("camera_id", StringType()),
+            StructField("timestamp", TimestampType()),
+            StructField("class_id", IntegerType()),
+            StructField("track_id", IntegerType()),
+            StructField("world_x", FloatType()),
+            StructField("world_y", FloatType()),
+            StructField("overlap_area", FloatType()),
+            StructField("bbox_area", FloatType()),
+            StructField("avg_speed", FloatType())
+        ])
+        
+        detections_df = df.groupBy("camera_id").applyInPandas(self.process_group, schema=output_schema)
+        return detections_df
