@@ -1,7 +1,7 @@
 FROM apache/spark:3.4.1
 USER root
 
-# Install minimal system dependencies (removed dev packages)
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     python3-pip \
     libgl1-mesa-glx \
@@ -11,18 +11,18 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install PyTorch CPU-only version (much lighter than CUDA version)
-RUN pip3 install --no-cache-dir \
-    torch torchvision
+# Install typing-extensions compatible with Python 3.8
+RUN pip3 install --no-cache-dir typing-extensions==4.5.0
 
-# Install core dependencies (minimal set)
+
+# Install dependencies for dispatcher
 RUN pip3 install --no-cache-dir \
-    ultralytics \
     minio \
     Pillow \
-    PyYAML
+    PyYAML \
+    kafka-python
 
-# Install PySpark (already in base image, but ensure version match)
+# Install PySpark
 RUN pip3 install --no-cache-dir pyspark==3.4.1
 
 COPY . .
@@ -32,5 +32,5 @@ CMD ["/opt/spark/bin/spark-submit", \
     "--conf", "spark.sql.execution.pythonUDF.arrow.enabled=false", \
     "--driver-memory", "2g", \
     "--executor-memory", "2g", \
-    "main.py"]
+    "dispatcher/dispatcher_main.py"]
 

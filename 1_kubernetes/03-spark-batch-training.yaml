@@ -1,28 +1,40 @@
-apiVersion: batch/v1
-kind: Job
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: traffic-yolo-train-manual
+  name: traffic-yolo-train
 spec:
-  ttlSecondsAfterFinished: 86400 
-  backoffLimit: 2
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-yolo-train
   template:
     metadata:
       labels:
-        app: traffic-yolo-train-manual
+        app: traffic-yolo-train
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Always
       containers:
-      - name: yolo-trainer
-        image: anvu1204/yolo-training-batch:v1
+      - name: yolo-dispatcher
+        image: anvu1204/yolo-training-batch:v9
         imagePullPolicy: Always
+
+        command: ["/opt/spark/bin/spark-submit"]
+        args:
+          - "--packages"
+          - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1"
+          - "--conf"
+          - "spark.sql.execution.pythonUDF.arrow.enabled=false"
+          - "--driver-memory"
+          - "2g"
+          - "dispatcher/dispatcher_main.py"
 
         resources:
           requests:
             memory: "4Gi"
-            cpu: "2000m"
+            cpu: "1"
           limits:
             memory: "8Gi"
-            cpu: "4000m" 
+            cpu: "2" 
         
         volumeMounts:
           - mountPath: /dev/shm
@@ -34,7 +46,9 @@ spec:
           - name: KAFKA_BROKER
             value: "my-kafka:9092"
           - name: TOPIC_NAME
-            value: "traffic_data"                
+            value: "traffic_data"  # Input topic: read data from here
+          - name: TRAINING_JOB_TOPIC
+            value: "training_jobs"  # Output topic: push training jobs here for GPU workers
           - name: MINIO_ENDPOINT
             value: "my-minio:9000"
           - name: MINIO_ACCESS_KEY
@@ -45,14 +59,14 @@ spec:
             value: "traffic-models"
           
           - name: SPARK_MASTER
-            value: "local[*]"
+            value: "local[*]"  # Dispatcher runs Spark locally for data processing only
           - name: SPARK_APP_NAME
-            value: "YOLO_Train_Job"
+            value: "YOLO_Training_Dispatcher"
           
           - name: EPOCHS
-            value: "10"
-          - name: BATCH_SIZE
             value: "1"
+          - name: BATCH_SIZE
+            value: "16"
           - name: IMG_SIZE
             value: "640"
           - name: MODEL_SIZE

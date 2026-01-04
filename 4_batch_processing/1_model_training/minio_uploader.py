@@ -1,7 +1,6 @@
 """
 MinIO uploader module for uploading training outputs
 """
-import os
 from pathlib import Path
 from typing import Dict, Optional
 from minio import Minio
@@ -43,11 +42,17 @@ class MinIOUploader:
         try:
             if not self.client.bucket_exists(self.bucket):
                 self.client.make_bucket(self.bucket)
-                print(f"Created bucket: {self.bucket}")
+                print(f"✓ Created bucket: {self.bucket}")
             else:
-                print(f"Bucket {self.bucket} already exists")
+                print(f"✓ Bucket {self.bucket} already exists")
         except S3Error as e:
-            print(f"Error ensuring bucket exists: {e}")
+            print(f"✗ ERROR: Failed to ensure bucket exists: {self.bucket}")
+            print(f"  Error: {e}")
+            raise
+        except Exception as e:
+            print(f"✗ UNEXPECTED ERROR: Failed to connect to MinIO")
+            print(f"  Endpoint: {self.client._base_url}")
+            print(f"  Error: {e}")
             raise
     
     def upload_file(self, local_path: str, object_name: str) -> bool:
@@ -64,21 +69,28 @@ class MinIOUploader:
         try:
             local_file = Path(local_path)
             if not local_file.exists():
-                print(f"File not found: {local_path}")
+                print(f"ERROR: File not found: {local_path}")
                 return False
+            
+            file_size = local_file.stat().st_size
+            print(f"Uploading {object_name} ({file_size / (1024*1024):.2f} MB)...")
             
             self.client.fput_object(
                 self.bucket,
                 object_name,
                 str(local_file)
             )
-            print(f"Uploaded: {object_name}")
+            print(f"✓ Successfully uploaded: {object_name}")
             return True
         except S3Error as e:
-            print(f"Error uploading {object_name}: {e}")
+            print(f"✗ ERROR uploading {object_name}: {e}")
+            print(f"  Error code: {e.code if hasattr(e, 'code') else 'unknown'}")
+            print(f"  Error message: {e.message if hasattr(e, 'message') else str(e)}")
             return False
         except Exception as e:
-            print(f"Unexpected error uploading {object_name}: {e}")
+            print(f"✗ UNEXPECTED ERROR uploading {object_name}: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def upload_training_outputs(
@@ -97,17 +109,13 @@ class MinIOUploader:
             Dictionary with file type as key and upload success status as value
         """
         results = {}
-        
-        # Mapping of file types to object names
         file_mapping = {
             'best_weights': f"{prefix}/best.pth",
-            'last_weights': f"{prefix}/last.pt",  # Use .pt for resume (YOLO native format)
+            'last_weights': f"{prefix}/last.pt",
             'train_log': f"{prefix}/train.log",
             'config_yaml': f"{prefix}/config.yaml",
             'metrics_json': f"{prefix}/metrics.json"
         }
-        
-        last_pt_path = None  # Track last.pt path to also upload .pth version
         
         for file_type, local_path in files.items():
             if local_path and local_path.exists():
@@ -115,30 +123,17 @@ class MinIOUploader:
                 
                 # For results.csv, rename to train.log
                 if file_type == 'train_log' and local_path.name == 'results.csv':
-                    # Copy to train.log first
-                    train_log_path = local_path.parent / "train.log"
                     import shutil
+                    train_log_path = local_path.parent / "train.log"
                     shutil.copy2(local_path, train_log_path)
                     success = self.upload_file(str(train_log_path), object_name)
                 else:
                     success = self.upload_file(str(local_path), object_name)
-                    # Track last.pt for later .pth upload
-                    if file_type == 'last_weights' and local_path.suffix == '.pt':
-                        last_pt_path = local_path
                 
                 results[file_type] = success
             else:
                 print(f"File not found for {file_type}: {local_path}")
                 results[file_type] = False
-        
-        # Also upload .pth version of last.pt for compatibility
-        if last_pt_path and last_pt_path.exists():
-            last_pth_path = last_pt_path.parent / "last.pth"
-            import shutil
-            if not last_pth_path.exists():
-                shutil.copy2(last_pt_path, last_pth_path)
-            self.upload_file(str(last_pth_path), f"{prefix}/last.pth")
-            print(f"Also uploaded .pth version: {prefix}/last.pth")
         
         return results
     
@@ -207,4 +202,44 @@ class MinIOUploader:
             raise
         except Exception:
             return False
+    
+    def save_training_state(self, state: dict, object_name: str = "yolo_training/training_state.json") -> bool:
+        """Save training state to MinIO"""
+        try:
+            import json
+            import tempfile
+            from pathlib import Path
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+                json.dump(state, f, indent=2)
+                temp_path = f.name
+            
+            success = self.upload_file(temp_path, object_name)
+            Path(temp_path).unlink()
+            return success
+        except Exception as e:
+            print(f"Error saving training state: {e}")
+            return False
+    
+    def load_training_state(self, object_name: str = "yolo_training/training_state.json") -> Optional[dict]:
+        """Load training state from MinIO"""
+        try:
+            import json
+            import tempfile
+            from pathlib import Path
+            
+            if not self.checkpoint_exists(object_name):
+                return None
+            
+            with tempfile.NamedTemporaryFile(mode='r', delete=False, suffix='.json') as f:
+                temp_path = f.name
+            
+            self.client.fget_object(self.bucket, object_name, temp_path)
+            with open(temp_path, 'r') as f:
+                state = json.load(f)
+            Path(temp_path).unlink()
+            return state
+        except Exception as e:
+            print(f"Error loading training state: {e}")
+            return None
 

@@ -1,14 +1,10 @@
 """
 YOLO model training module using Ultralytics
 """
-import os
 import json
-import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional
-import torch
 from ultralytics import YOLO
-import yaml
 
 
 class YOLOModelTrainer:
@@ -30,11 +26,36 @@ class YOLOModelTrainer:
         self.model_size = model_size
         self.resume_from = resume_from
         
-        # Use CPU only for training
-        self.device = "cpu"
-        print(f"Using device: {self.device} (CPU-only mode)")
+        self.device = self._detect_device()
+        device_info = self._get_device_info()
+        print(f"Using device: {self.device} {device_info}")
         if self.resume_from:
             print(f"Will resume training from: {self.resume_from}")
+    
+    def _detect_device(self) -> str:
+        """Detect available device (GPU if available, otherwise CPU)"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            else:
+                return "cpu"
+        except Exception as e:
+            print(f"Error detecting device, falling back to CPU: {e}")
+            return "cpu"
+    
+    def _get_device_info(self) -> str:
+        """Get device information string"""
+        try:
+            import torch
+            if self.device == "cuda" and torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                device_count = torch.cuda.device_count()
+                return f"(GPU: {device_name}, count: {device_count})"
+            else:
+                return "(CPU mode)"
+        except Exception:
+            return ""
     
     def train(
         self,
@@ -69,6 +90,14 @@ class YOLOModelTrainer:
         # Load model (either from checkpoint or base model)
         model = YOLO(model_path)
         
+        if self.device == "cuda":
+            try:
+                import torch
+                torch.cuda.empty_cache()
+                print("GPU cache cleared")
+            except Exception as e:
+                print(f"Warning: Could not clear GPU cache: {e}")
+        
         # Training arguments
         train_args = {
             'data': self.dataset_yaml,
@@ -79,14 +108,15 @@ class YOLOModelTrainer:
             'project': str(self.output_dir),
             'name': 'train',
             'exist_ok': True,
+            'amp': True,  # Automatic Mixed Precision
+            'workers': 4,  # Number of data loading workers
+            'cache': False,  # No cache images in RAM
             **kwargs
         }
         
-        # Note: When loading model from checkpoint path, Ultralytics automatically resumes training
-        # The 'resume' flag is only needed when resuming from the same output directory structure
         
         # Train model
-        results = model.train(**train_args)
+        model.train(**train_args)
         
         # Get training results
         train_results_dir = self.output_dir / "train"
@@ -94,7 +124,6 @@ class YOLOModelTrainer:
         best_weights = weights_dir / "best.pt"
         last_weights = weights_dir / "last.pt"
         results_csv = train_results_dir / "results.csv"
-        args_yaml = train_results_dir / "args.yaml"
         
         # Load metrics if available
         metrics = {}
@@ -131,7 +160,6 @@ class YOLOModelTrainer:
             'dataset_yaml': self.dataset_yaml,
             'best_weights': str(best_weights) if best_weights.exists() else None,
             'last_weights': str(last_weights) if last_weights.exists() else None,
-            'args_yaml': str(args_yaml) if args_yaml.exists() else None,
             'metrics': metrics
         }
         
@@ -150,7 +178,7 @@ class YOLOModelTrainer:
         files = {
             'best_weights': weights_dir / "best.pt",
             'last_weights': weights_dir / "last.pt",
-            'train_log': train_dir / "results.csv",  # Ultralytics saves as CSV, we'll rename to train.log
+            'train_log': train_dir / "results.csv",  # Ultralytics saves as CSV
             'config_yaml': train_dir / "args.yaml",
             'metrics_json': train_dir / "metrics.json"
         }

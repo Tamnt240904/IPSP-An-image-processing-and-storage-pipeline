@@ -1,0 +1,11 @@
+# Pytorch:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# Core dependencies
+ultralytics
+minio
+Pillow
+PyYAML
+pyspark==3.5.0
+confluent-kafka  # For Kafka producer in dispatcher mode
+

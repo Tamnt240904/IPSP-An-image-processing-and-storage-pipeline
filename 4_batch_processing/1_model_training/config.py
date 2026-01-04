@@ -11,6 +11,7 @@ class Config:
     # Kafka Configuration
     KAFKA_BROKER: str = os.environ.get("KAFKA_BROKER", "my-kafka:9092")
     TOPIC_NAME: str = os.environ.get("TOPIC_NAME", "traffic_data")
+    TRAINING_JOB_TOPIC: str = os.environ.get("TRAINING_JOB_TOPIC", "training_jobs")
     
     # MinIO Configuration
     MINIO_ENDPOINT: str = os.environ.get("MINIO_ENDPOINT", "my-minio:9000")
@@ -24,29 +25,19 @@ class Config:
     SPARK_APP_NAME: str = os.environ.get("SPARK_APP_NAME", "YOLO_Training_Batch")
     
     # Training Configuration
-    BATCH_SIZE: int = int(os.environ.get("BATCH_SIZE", "16"))
-    EPOCHS: int = int(os.environ.get("EPOCHS", "5"))
+    BATCH_SIZE: int = int(os.environ.get("BATCH_SIZE", "8"))
+    EPOCHS: int = int(os.environ.get("EPOCHS", "10"))
     IMG_SIZE: int = int(os.environ.get("IMG_SIZE", "640"))
     DATA_DIR: str = os.environ.get("DATA_DIR", "/tmp/yolo_training_data")
-    OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "/tmp/yolo_training_output")
+    OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "E:\\tmp")
     CHECKPOINT_DIR: str = os.path.join(OUTPUT_DIR, "weights")
     
     # Model Configuration
-    MODEL_SIZE: str = os.environ.get("MODEL_SIZE", "yolov8n.pt")  # yolov8n, yolov8s, yolov8m, yolov8l, yolov8x
+    MODEL_SIZE: str = os.environ.get("MODEL_SIZE", "yolov8n.pt")
+    
+    # Training Trigger Configuration
+    NEW_DATA_THRESHOLD: int = int(os.environ.get("NEW_DATA_THRESHOLD", "1000"))
+    CHECK_INTERVAL_HOURS: int = int(os.environ.get("CHECK_INTERVAL_HOURS", "24"))
     
     # GPU Configuration
-    DEVICE: Optional[str] = None  # Will be auto-detected
-    
-    @classmethod
-    def get_device(cls) -> str:
-        """Return CPU device (CPU-only training)"""
-        return "cpu"
-    
-    @classmethod
-    def initialize_dirs(cls):
-        """Initialize necessary directories"""
-        import os
-        os.makedirs(cls.DATA_DIR, exist_ok=True)
-        os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
-        os.makedirs(cls.CHECKPOINT_DIR, exist_ok=True)
-
+    DEVICE: Optional[str] = None
